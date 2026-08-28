@@ -41,7 +41,7 @@ pub fn entry() -> Value {
             "matcher": super::write_matcher(),
             "hooks": [{
                 "type": "command",
-                "command": "ralon hook check",
+                "command": super::COMMAND,
                 "timeout": 15
             }]
         }]

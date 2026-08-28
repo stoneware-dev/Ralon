@@ -20,6 +20,21 @@ use super::Registration;
 
 pub const SUPPORTED: bool = true;
 
+/// A shell's `PATH` here lives in whichever startup file that shell reads —
+/// `.zshrc`, `.bash_profile`, `.config/fish/config.fish`, or a `paths.d` entry.
+/// Picking one is a guess, and a wrong guess means Ralon has appended a line to
+/// a file the developer maintains by hand and does not expect anyone else to
+/// touch. So the line is printed and they run it.
+pub const CAN_EDIT_PATH: bool = false;
+
+pub fn add_to_path(_directory: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+pub fn remove_from_path(_directory: &Path) -> Result<bool> {
+    Ok(false)
+}
+
 const LABEL: &str = "dev.stoneware.ralon.supervisor";
 
 pub fn install(executable: &Path, home: &Path) -> Result<Registration> {

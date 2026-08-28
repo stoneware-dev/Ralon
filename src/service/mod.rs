@@ -23,6 +23,7 @@ mod platform;
 #[path = "unsupported.rs"]
 mod platform;
 
+pub mod pathvar;
 pub mod stage;
 
 use std::path::{Path, PathBuf};
@@ -31,6 +32,35 @@ use anyhow::Result;
 
 /// Whether a supervisor can be registered here at all.
 pub const SUPPORTED: bool = platform::SUPPORTED;
+
+/// Whether `install` can put the staged binary on `PATH` itself, or has to say
+/// how. See [`add_to_path`].
+pub const CAN_EDIT_PATH: bool = platform::CAN_EDIT_PATH;
+
+/// Makes the staged binary findable by name. `Ok(false)` means it already was.
+///
+/// This exists because of the one thing staging the binary took away. Every
+/// agent hook Ralon writes invokes `ralon hook check` — a *name*, because those
+/// files get committed and an absolute path would be one machine's home
+/// directory in everybody's repository. The name resolving was, until this,
+/// entirely the package manager's doing: `npm`, `bun`, `pip` and `cargo` each
+/// put a copy on `PATH` and Ralon relied on it being there.
+///
+/// Then `install` started registering its own copy precisely so that the
+/// package could be removed — and removing it takes `ralon` off `PATH` while
+/// leaving the supervisor running and nine hooks installed that can no longer
+/// run. Nothing reported it: the shell exits 1, no agent reads that as "deny",
+/// so the edit goes ahead and is refused by the kernel with `EBUSY` instead.
+/// Adding the staged directory here is what closes that, and it is appended
+/// rather than prepended so a package manager's copy still wins when it exists.
+pub fn add_to_path(directory: &Path) -> Result<bool> {
+    platform::add_to_path(directory)
+}
+
+/// Takes it back off, for `uninstall`. `Ok(false)` means it was not there.
+pub fn remove_from_path(directory: &Path) -> Result<bool> {
+    platform::remove_from_path(directory)
+}
 
 /// What happened, in terms a person can check by hand afterwards.
 pub struct Registration {

@@ -32,7 +32,7 @@ pub const EVENT: &str = "PreToolUse";
 pub fn entry() -> Value {
     json!({
         "type": "command",
-        "command": "ralon hook check",
+        "command": super::COMMAND,
         // Long enough for a cold start on a large policy, short enough that a
         // wedged hook does not hang the agent. Copilot treats a timeout as a
         // non-blocking warning, so this failing open is the documented

@@ -14,7 +14,7 @@ use super::Installed;
 
 pub const SETTINGS: &str = ".opencode/plugins/ralon.js";
 
-const PLUGIN: &str = r#"// Written by `ralon hook install`. Safe to delete; safe to regenerate.
+pub const PLUGIN: &str = r#"// Written by `ralon hook install`. Safe to delete; safe to regenerate.
 //
 // Refuses any tool call that names a path agent.lock protects. The decision is
 // made by `ralon hook check`, which reads the request on stdin and exits 2 to

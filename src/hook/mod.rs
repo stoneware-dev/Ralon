@@ -150,6 +150,188 @@ pub fn write_matcher() -> String {
         .join("|")
 }
 
+/// The program every agent's hook entry invokes, and the command it forms.
+///
+/// A *name*, not a path, and that is the load-bearing decision: these entries
+/// are written into `.claude/settings.json` and eight siblings, all of which
+/// people commit. An absolute path would be one developer's machine baked into
+/// the repository — wrong for everybody else, and leaking a home directory into
+/// git along the way.
+///
+/// The cost is that the name has to resolve, and [`resolves`] is what checks it.
+pub const PROGRAM: &str = "ralon";
+pub const COMMAND: &str = "ralon hook check";
+
+/// Every settings file a hook can be installed into.
+///
+/// Listed once so "is a hook installed here" has one answer. A tenth agent is a
+/// new module and an entry here.
+pub const SETTINGS_FILES: &[&str] = &[
+    claude::SETTINGS,
+    cursor::SETTINGS,
+    opencode::SETTINGS,
+    copilot::SETTINGS,
+    codex::SETTINGS,
+    gemini::SETTINGS,
+    antigravity::SETTINGS,
+    windsurf::SETTINGS,
+    cline::SETTINGS,
+];
+
+/// Whether this project has a hook to run at all.
+pub fn installed_in(root: &Path) -> bool {
+    SETTINGS_FILES
+        .iter()
+        .any(|relative| root.join(relative).is_file())
+}
+
+/// Where a shell would find [`PROGRAM`], or `None` if it would find nothing.
+///
+/// This is not a nicety. Every hook entry names the program rather than a path,
+/// so a machine where the name does not resolve has nine installed hooks that
+/// cannot run — and the failure is silent in the worst way: the shell exits 1,
+/// which no agent reads as "deny", so the edit proceeds and is refused by the
+/// kernel instead. The developer gets `EBUSY: resource busy or locked` and
+/// concludes their repository is broken, which is the exact outcome the hook
+/// exists to prevent.
+///
+/// That machine is not hypothetical. `ralon install` stages its own copy of the
+/// binary precisely so the package manager's copy can be deleted — and once it
+/// is, nothing is left on `PATH`.
+pub fn resolves() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let pathext = std::env::var_os("PATHEXT");
+    lookup(PROGRAM, &path, pathext.as_deref(), here(), &|candidate| {
+        is_executable(candidate)
+    })
+}
+
+/// How one platform spells a search path.
+///
+/// Passed in rather than read from `cfg!` inside the search, so the cases worth
+/// testing — which are all about `PATHEXT` — can be checked from any host. It is
+/// the rule the rest of this project follows: planning is platform-independent,
+/// and only the syscalls are gated.
+#[derive(Clone, Copy)]
+struct Shell {
+    separator: char,
+    /// Whether a name needs an extension before anything will run it.
+    extensions: bool,
+}
+
+const WINDOWS: Shell = Shell {
+    separator: ';',
+    extensions: true,
+};
+
+const POSIX: Shell = Shell {
+    separator: ':',
+    extensions: false,
+};
+
+fn here() -> Shell {
+    if cfg!(windows) {
+        WINDOWS
+    } else {
+        POSIX
+    }
+}
+
+/// The search itself, with the environment and the filesystem passed in.
+///
+/// Separated so it can be tested against a Windows `PATH` from Linux and the
+/// other way round — the interesting cases are all about `PATHEXT`, and none of
+/// them need a real file.
+fn lookup(
+    program: &str,
+    path: &std::ffi::OsStr,
+    pathext: Option<&std::ffi::OsStr>,
+    shell: Shell,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    for directory in path.to_string_lossy().split(shell.separator) {
+        let directory = directory.trim_matches('"');
+        if directory.is_empty() {
+            continue;
+        }
+        for name in names(program, pathext, shell) {
+            let candidate = Path::new(directory).join(&name);
+            if exists(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The filenames `program` could have on this platform.
+///
+/// `PATHEXT` is why this is not just `program.exe`. npm and bun put a `.cmd`
+/// shim on `PATH`, never an `.exe` — so a check that looked only for `ralon.exe`
+/// would report "not installed" on the most common way people install this, and
+/// send them fixing something that was never broken.
+fn names(program: &str, pathext: Option<&std::ffi::OsStr>, shell: Shell) -> Vec<String> {
+    if !shell.extensions {
+        return vec![program.to_string()];
+    }
+    let extensions = pathext
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut names = Vec::new();
+    for extension in extensions.split(';') {
+        let extension = extension.trim();
+        if !extension.is_empty() {
+            names.push(format!("{program}{}", extension.to_ascii_lowercase()));
+        }
+    }
+    // Last, so an extension wins: a bare `ralon` on Windows is a file `cmd`
+    // cannot run on its own, and finding it would be a false positive.
+    names.push(program.to_string());
+    names
+}
+
+/// A file something could actually execute.
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    // Windows decides by extension, which `names` has already applied.
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// What to tell someone whose hooks cannot run, or `None` when they can.
+///
+/// One sentence of diagnosis and one of remedy, because "not on PATH" on its own
+/// invites the wrong conclusion — that Ralon is not installed, or that the
+/// policy is not being enforced. Both are usually false: enforcement is in the
+/// kernel and does not go through this at all.
+pub fn unreachable_warning(home: &Path) -> Option<String> {
+    if resolves().is_some() {
+        return None;
+    }
+    Some(format!(
+        "`{PROGRAM}` is not on PATH, so the agent hooks cannot run. Every policy is \
+         still enforced; what is lost is that an agent gets the filesystem's error \
+         rather than being told which file and which pattern. Add {} to PATH, or \
+         reinstall the ralon package.",
+        crate::service::stage::path(home)
+            .parent()
+            .map(|directory| directory.display().to_string())
+            .unwrap_or_else(|| "Ralon's bin directory".to_string())
+    ))
+}
+
 /// The tool being called, wherever this agent puts it.
 fn tool_name(request: &Value) -> Option<&str> {
     request
@@ -483,6 +665,7 @@ mod tests {
     use super::*;
     use claude::SETTINGS;
     use serde_json::json;
+    use std::ffi::OsStr;
 
     fn project(policy: &str) -> tempdir::TempDir {
         let dir = tempdir::TempDir::new();
@@ -819,5 +1002,126 @@ mod tests {
                 "`{tool}` fires the hook for nothing"
             );
         }
+    }
+
+    /// One spelling for a path, so these tests mean the same thing on every
+    /// host. `Path::join` uses the *running* platform's separator, so a Windows
+    /// case checked from Linux produces `C:\dir/ralon.exe` — comparing that
+    /// literally would make the test assert which machine it is running on.
+    fn tidy(path: &str) -> String {
+        path.to_lowercase().replace('\\', "/")
+    }
+
+    /// A stub filesystem: anything in the list is an executable file.
+    fn present(paths: &[&str]) -> impl Fn(&Path) -> bool {
+        let owned: Vec<String> = paths.iter().map(|path| tidy(path)).collect();
+        move |candidate: &Path| owned.contains(&tidy(&candidate.display().to_string()))
+    }
+
+    /// What the search found, spelled one way. Empty means it found nothing.
+    fn resolved(path: &str, pathext: Option<&str>, shell: Shell, on_disk: &[&str]) -> String {
+        lookup(
+            "ralon",
+            OsStr::new(path),
+            pathext.map(OsStr::new),
+            shell,
+            &present(on_disk),
+        )
+        .map(|found| tidy(&found.display().to_string()))
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_cmd_shim_counts_as_finding_the_program() {
+        // The case that made this necessary. npm and bun never put an `.exe` on
+        // PATH — they put a `.cmd` shim — so a check that looked for `ralon.exe`
+        // alone would report the most common installation as missing, and send
+        // someone repairing a machine that was working.
+        assert_eq!(
+            resolved(
+                r"C:\other;C:\Users\me\AppData\Roaming\npm",
+                Some(".COM;.EXE;.BAT;.CMD"),
+                WINDOWS,
+                &[r"C:\Users\me\AppData\Roaming\npm\ralon.cmd"],
+            ),
+            "c:/users/me/appdata/roaming/npm/ralon.cmd"
+        );
+    }
+
+    #[test]
+    fn a_posix_path_is_searched_with_no_extension_at_all() {
+        assert_eq!(
+            resolved(
+                "/usr/bin:/home/me/.cargo/bin",
+                None,
+                POSIX,
+                &["/home/me/.cargo/bin/ralon"],
+            ),
+            "/home/me/.cargo/bin/ralon"
+        );
+    }
+
+    #[test]
+    fn nothing_on_path_is_reported_as_nothing() {
+        // The state this whole check exists for: hooks installed, `ralon` gone.
+        assert_eq!(
+            resolved(
+                r"C:\other;C:\also-not-here",
+                Some(".EXE;.CMD"),
+                WINDOWS,
+                &[]
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_first_directory_on_path_wins() {
+        // Order is the whole reason `install` appends its own directory rather
+        // than prepending it: a package manager's copy, which upgrades, must
+        // beat the staged snapshot, which does not.
+        assert_eq!(
+            resolved(
+                r"C:\first;C:\second",
+                Some(".EXE"),
+                WINDOWS,
+                &[r"C:\first\ralon.exe", r"C:\second\ralon.exe"],
+            ),
+            "c:/first/ralon.exe"
+        );
+    }
+
+    #[test]
+    fn an_extension_beats_the_bare_name_on_windows() {
+        // A bare `ralon` next to `ralon.exe` on Windows is not a program `cmd`
+        // can run — matching it first would report a hook as runnable when it
+        // is not.
+        let names = names("ralon", Some(OsStr::new(".EXE;.CMD")), WINDOWS);
+        assert_eq!(names, vec!["ralon.exe", "ralon.cmd", "ralon"]);
+    }
+
+    #[test]
+    fn every_agent_invokes_the_command_the_check_looks_for() {
+        // `resolves()` asks about one program name. If an agent's entry ever
+        // named a different one, this check would be answering a question
+        // nobody was asking — green while that agent's hook could not run.
+        for (agent, entry) in [
+            ("claude", claude::entry()),
+            ("cursor", cursor::entry()),
+            ("copilot", copilot::entry()),
+            ("codex", codex::entry()),
+            ("gemini", gemini::entry()),
+            ("antigravity", antigravity::entry()),
+            ("windsurf", windsurf::entry()),
+        ] {
+            let text = entry.to_string();
+            assert!(
+                text.contains(COMMAND),
+                "{agent} does not invoke `{COMMAND}`: {text}"
+            );
+        }
+        // The two that are scripts rather than JSON, checked as written.
+        assert!(cline::SCRIPT.contains(COMMAND));
+        assert!(opencode::PLUGIN.contains(COMMAND));
     }
 }

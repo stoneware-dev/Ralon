@@ -22,6 +22,17 @@ use super::Registration;
 
 pub const SUPPORTED: bool = false;
 
+/// See the note in `macos.rs`: a shell's `PATH` is in a file the developer owns.
+pub const CAN_EDIT_PATH: bool = false;
+
+pub fn add_to_path(_directory: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+pub fn remove_from_path(_directory: &Path) -> Result<bool> {
+    Ok(false)
+}
+
 pub fn install(_executable: &Path, _home: &Path) -> Result<Registration> {
     anyhow::bail!("{}", unsupported_reason())
 }

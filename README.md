@@ -266,6 +266,7 @@ defeatable for exactly that reason.
 | The project is outside every scope | Not enforced, and `ralon status` says exactly that — `policy found, but this project is outside every scope … it is NOT protected` — followed by the `ralon scope add` that covers it. |
 | A scope's directory is gone (drive unplugged, share unmounted) | Everything else carries on. `ralon scope list` marks it `(unreachable)`. |
 | The agent hook is missing | Still enforced — the agent just sees the filesystem's own error (`EBUSY`, `Access is denied`, `EPERM`) rather than being told why. `ralon hook install` fixes it. |
+| The hook is installed but `ralon` is not on PATH | The same outcome, reached a nastier way: every hook entry invokes `ralon hook check` by name, a shell that cannot find it exits 1, and no agent reads 1 as a refusal — so the edit goes ahead and the kernel refuses it instead. Still enforced. `ralon status` now says so and how to fix it; `ralon install` appends its own directory to PATH on Windows. |
 | A console window appears on Windows at logon, or at `ralon install` | Fixed. The logon task ran with an interactive token, and a console program started by something with no console of its own gets a fresh, visible one; the task's `Hidden` setting does not affect that, and this project claimed it did. The task now runs in session 0, where there is no desktop for a window to appear on. A machine whose policy withholds the batch logon right falls back to the old behaviour and says so. |
 | A console window flashes when the agent edits a file | Your agent is spawning `ralon hook check` without hiding the window — a spawn flag Ralon does not control. Nothing Ralon starts in the background has one: the supervisor runs in session 0 and guards are created detached. `ralon install --no-hooks`, or `ralon hook install --agent <one>`, reduces how often it is spawned; enforcement is unaffected either way. |
 | `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |
@@ -298,6 +299,13 @@ capable of blocking an edit before it happens — nine of them:
 single JSON document carrying every one of those keys, plus exit code 2, since
 emitting a key an agent ignores costs nothing and omitting one it needs is an
 edit waved through.
+
+Every entry names the **program**, not a path — these files get committed, and an
+absolute path would be one developer's machine in everybody's repository. So the
+name has to resolve: `ralon install` appends its own directory to your `PATH` on
+Windows, and prints the line to add elsewhere. `ralon status` says so when a
+project has hooks it cannot run, because that state looks exactly like Ralon not
+being involved at all.
 
 Two are deliberately **not** installed, for the same reason:
 

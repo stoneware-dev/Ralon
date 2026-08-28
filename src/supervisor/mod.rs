@@ -527,6 +527,19 @@ pub fn run(supervisor: &mut Supervisor) -> Result<()> {
         supervisor.say(&format!("warning: {warning}"));
     }
 
+    // Said once here rather than per project, because it is a fact about the
+    // machine and not about any workspace. Under the supervisor nobody runs
+    // `status`, so without this the one condition that makes every installed
+    // hook inert has nowhere to be reported at all — which is how it went
+    // unnoticed long enough for an agent to be handed `EBUSY` and believe the
+    // repository was broken.
+    if supervisor.registry.config.hooks {
+        let home = supervisor.registry.home().to_path_buf();
+        if let Some(warning) = crate::hook::unreachable_warning(&home) {
+            supervisor.say(&format!("warning: {warning}"));
+        }
+    }
+
     // Before waiting on anything: the state on disk may have moved on while no
     // supervisor was running, and after a reboot this pass is the whole job.
     supervisor.tick(true)?;

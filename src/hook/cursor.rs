@@ -23,9 +23,9 @@ pub const SETTINGS: &str = ".cursor/hooks.json";
 /// because the configuration implies coverage that is not there.
 const EVENTS: &[&str] = &["preToolUse"];
 
-fn entry() -> Value {
+pub fn entry() -> Value {
     json!({
-        "command": "ralon hook check",
+        "command": super::COMMAND,
         "type": "command",
         // Fail closed: if the check cannot run, refuse rather than allow. A
         // policy that evaporates when a binary is missing is not a policy.
@@ -38,7 +38,7 @@ fn is_ours(candidate: &Value) -> bool {
     candidate
         .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| command.contains("ralon hook check"))
+        .is_some_and(|command| command.contains(super::COMMAND))
 }
 
 pub fn install(root: &Path, dry_run: bool) -> Result<Installed> {

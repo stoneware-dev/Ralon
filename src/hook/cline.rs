@@ -21,7 +21,7 @@ use super::Installed;
 
 pub const SETTINGS: &str = ".clinerules/hooks/PreToolUse";
 
-const SCRIPT: &str = r#"#!/bin/sh
+pub const SCRIPT: &str = r#"#!/bin/sh
 # Written by `ralon hook install`. Safe to delete; safe to regenerate.
 #
 # Refuses any tool call that names a path agent.lock protects. `exec` hands the

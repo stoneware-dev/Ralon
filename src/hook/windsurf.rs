@@ -18,8 +18,8 @@ pub const EVENT: &str = "pre_write_code";
 
 pub fn entry() -> Value {
     json!({
-        "command": "ralon hook check",
-        "powershell": "ralon hook check",
+        "command": super::COMMAND,
+        "powershell": super::COMMAND,
         "show_output": false
     })
 }
@@ -29,6 +29,6 @@ pub fn is_ours(candidate: &Value) -> bool {
         candidate
             .get(*key)
             .and_then(Value::as_str)
-            .is_some_and(|command| command.contains("ralon hook check"))
+            .is_some_and(|command| command.contains(super::COMMAND))
     })
 }

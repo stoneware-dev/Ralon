@@ -26,7 +26,7 @@ pub fn entry() -> Value {
         "matcher": super::write_matcher(),
         "hooks": [{
             "type": "command",
-            "command": "ralon hook check"
+            "command": super::COMMAND
         }]
     })
 }
@@ -39,7 +39,7 @@ pub fn is_ours(candidate: &Value) -> bool {
             hooks.iter().any(|hook| {
                 hook.get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|command| command.contains("ralon hook check"))
+                    .is_some_and(|command| command.contains(super::COMMAND))
             })
         })
 }

@@ -6,13 +6,16 @@ the CLI is untouched.
 
 ## 0.1.7
 
-Four bugs reported from one Windows install, and one of them was hiding a fifth.
+Four bugs reported from one Windows install. One was hiding a fifth, and fixing
+the fourth created a sixth — found before release, on the machine that reported
+the others.
 
-None of them touched enforcement itself; all four were about the machinery
-around it — how the supervisor is registered, how a guard is found, and how the
-package is removed. Anyone who installed `0.1.6` on Windows should run `ralon
-uninstall` and reinstall, because the registration written then points at the
-package manager's copy of the binary.
+None of them touched enforcement itself; they were all about the machinery
+around it — how the supervisor is registered, how a guard is found, how the
+package is removed, and whether the agent hooks can run at all. Anyone who
+installed `0.1.6` on Windows should run `ralon uninstall` and reinstall, because
+the registration written then points at the package manager's copy of the
+binary.
 
 ### Changed
 
@@ -102,8 +105,32 @@ package manager's copy of the binary.
   `preuninstall` scripts, and `pip` and `cargo` never had an uninstall hook — so
   `ralon install` now says to run `ralon uninstall` first, and the README does
   too.
-- **`ralon uninstall` finishes the job**, removing the staged binary and saying
-  what is left if it cannot.
+- **`ralon install` puts its own directory on PATH, so the agent hooks can
+  run.** Every hook entry invokes `ralon hook check` — a name rather than a path,
+  because those files get committed and an absolute path would be one
+  developer's machine in everybody's repository. Whether that name resolved was
+  entirely the package manager's doing, and staging the binary (above) made it
+  possible for the package to be gone while the supervisor keeps running: nine
+  installed hooks, none of which can start. The failure is silent in the worst
+  way — a shell that cannot find `ralon` exits 1, no agent reads 1 as "deny", so
+  the edit proceeds, the kernel refuses it, and the developer is handed
+  `EBUSY: resource busy or locked` about a repository that is working exactly as
+  intended.
+
+  The directory is **appended**, so a package manager's copy still wins where
+  there is one; that copy is the one that upgrades, and a staged snapshot
+  shadowing it would make `ralon --version` wrong after every upgrade. Written
+  through the registry rather than with `setx`, which truncates `PATH` at 1024
+  characters, and preserving the value's `REG_EXPAND_SZ` type, so `%USERPROFILE%`
+  entries keep expanding. `ralon uninstall` takes the entry back out, and neither
+  writes anything at all when there is nothing to change. Windows only: a shell's
+  `PATH` elsewhere lives in a startup file the developer maintains by hand, so
+  the line to add is printed instead.
+
+- **`status`, `hook install` and the supervisor now report a hook that cannot
+  run.** Previously nothing did, on any platform, and every symptom pointed
+  somewhere else. `status` explains what is lost — the message, not the
+  protection — and says how to fix it.
 
 ### Security
 

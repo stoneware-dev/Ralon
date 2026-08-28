@@ -59,10 +59,51 @@ pub fn init(directory: &Path, force: bool, no_hooks: bool) -> Result<ExitCode> {
     }
     println!();
     print_what_a_refusal_looks_like();
-    println!();
-    println!("If this is useful, a star helps other people find it:");
-    println!("  https://github.com/stoneware-dev/Ralon");
+    print_the_repository();
     Ok(ExitCode::from(OK))
+}
+
+/// Makes the name every hook entry invokes resolve to something.
+///
+/// The hooks say `ralon hook check` — a name, because these files are committed
+/// and an absolute path would be one developer's machine in everybody's
+/// repository. Whether that name resolves was, until this, entirely the package
+/// manager's doing. Staging the binary made the package removable and thereby
+/// made it possible to have a running supervisor, nine installed hooks, and no
+/// `ralon` on `PATH` — a state in which every hook exits 1, no agent reads that
+/// as a refusal, and the developer is handed `EBUSY` by the filesystem instead
+/// of being told which file and which pattern.
+fn ensure_the_hooks_can_run(staged: &Path, home: &Path, hooks: bool) {
+    let Some(directory) = staged.parent() else {
+        return;
+    };
+    match service::add_to_path(directory) {
+        Ok(true) => {
+            println!("path       {}", directory.display());
+            println!("           added to PATH, so `ralon` resolves in a new terminal");
+            return;
+        }
+        // Already there. The machine is configured whether or not *this* shell
+        // was started before it was, and `install` reports the machine.
+        Ok(false) if service::CAN_EDIT_PATH => return,
+        Ok(false) => {}
+        Err(error) => eprintln!(
+            "ralon: warning: could not add {} to PATH ({error:#})",
+            directory.display()
+        ),
+    }
+    if !hooks {
+        return;
+    }
+    if let Some(warning) = hook::unreachable_warning(home) {
+        eprintln!("ralon: warning: {warning}");
+        if !service::CAN_EDIT_PATH {
+            eprintln!(
+                "ralon:          export PATH=\"$PATH:{}\"",
+                directory.display()
+            );
+        }
+    }
 }
 
 /// Says in advance what enforcement looks like from the other side.
@@ -75,17 +116,33 @@ pub fn init(directory: &Path, force: bool, no_hooks: bool) -> Result<ExitCode> {
 /// remaining honest move is to tell the developer beforehand, once, that the
 /// confusing error is the tool working.
 fn print_what_a_refusal_looks_like() {
-    let errors = if cfg!(windows) {
+    println!("An agent that reaches a protected path reports");
+    println!("  {}", the_filesystem_error());
+    println!("which is Ralon refusing the write, not a damaged file. Agents with a");
+    println!("hook running are told that in words instead — which file, which");
+    println!("pattern matched, and that retrying will not help.");
+}
+
+/// What the operating system says when the policy stops a write.
+fn the_filesystem_error() -> &'static str {
+    if cfg!(windows) {
         "`EBUSY: resource busy or locked`, or `Access is denied`"
     } else if cfg!(target_os = "macos") {
         "`EPERM: operation not permitted`"
     } else {
         "`EROFS: read-only file system`, or `EACCES: permission denied`"
-    };
-    println!("An agent that reaches a protected path reports");
-    println!("  {errors}");
-    println!("which is Ralon refusing the write, not a damaged file. Agents with a");
-    println!("hook installed are told that in words instead.");
+    }
+}
+
+/// The one thing this tool asks for, in the one place it asks for it.
+///
+/// A function rather than four lines repeated in every command, so the wording
+/// and the URL have a single home. Printed where somebody has just been told
+/// something useful — not on every invocation, which would make it noise.
+fn print_the_repository() {
+    println!();
+    println!("Ralon is free and open source: https://github.com/stoneware-dev/Ralon");
+    println!("If it saved you something, a star helps other people find it.");
 }
 
 /// Sets the machine up once, so that a project is protected by containing an
@@ -137,6 +194,15 @@ pub fn install(
             depth.unwrap_or(registry::DEFAULT_MAX_DEPTH)
         );
         println!("hooks      {}", if no_hooks { "no" } else { "yes" });
+        if service::CAN_EDIT_PATH {
+            println!(
+                "path       {} (appended)",
+                service::stage::path(&home)
+                    .parent()
+                    .unwrap_or(&home)
+                    .display()
+            );
+        }
         println!();
         println!("Nothing was registered.");
         return Ok(ExitCode::from(OK));
@@ -203,6 +269,7 @@ pub fn install(
         )
     );
     println!("log        {}", supervisor.registry().log_path().display());
+    ensure_the_hooks_can_run(&staged, &home, !no_hooks);
     for warning in &registration.warnings {
         eprintln!("ralon: warning: {warning}");
     }
@@ -552,6 +619,27 @@ pub fn uninstall(keep_enforcement: bool) -> Result<ExitCode> {
     // without clearing it first, removing the file below fails.
     selfguard::release(&home);
 
+    // Whatever `install` added, and only that. `remove_from_path` reports
+    // `false` for a directory it does not find, so an uninstall on a machine
+    // where the entry was never added — or was taken out by hand — writes
+    // nothing to the registry at all.
+    if let Some(directory) = service::stage::path(&home).parent() {
+        match service::remove_from_path(directory) {
+            Ok(true) => println!("path       removed {}", directory.display()),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "ralon: warning: could not remove {} from PATH ({error:#})",
+                directory.display()
+            ),
+        }
+    }
+
+    // Left by a version that kept a hash of the scopes and reported a mismatch.
+    // That approach was removed rather than fixed — see `supervisor::selfguard`
+    // — and nothing has written this since, so an install that predates the
+    // change is the only way it exists. Tidying, not correctness.
+    let _ = std::fs::remove_file(home.join("scopes.fingerprint"));
+
     match service::stage::remove(&home) {
         Ok(true) => println!("removed    {}", service::stage::path(&home).display()),
         Ok(false) => {}
@@ -845,19 +933,7 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
     // "unavailable" states a fact and leaves the wrong conclusion available:
     // that a policy which lists protected paths is protecting them. It is not.
     if !availability.iter().any(|(_, status)| status.is_available()) {
-        let hooked = [
-            hook::claude::SETTINGS,
-            hook::cursor::SETTINGS,
-            hook::opencode::SETTINGS,
-            hook::copilot::SETTINGS,
-            hook::codex::SETTINGS,
-            hook::gemini::SETTINGS,
-            hook::antigravity::SETTINGS,
-            hook::windsurf::SETTINGS,
-            hook::cline::SETTINGS,
-        ]
-        .iter()
-        .any(|relative| policy.root.join(relative).is_file());
+        let hooked = hook::installed_in(&policy.root);
         println!();
         println!("Nothing on this machine can stop an agent from writing to those paths.");
         println!("`ralon run` will refuse to start rather than pretend otherwise.");
@@ -869,6 +945,7 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
         println!("  wsl                   run the agent where the kernel can enforce");
     }
 
+    warn_about_hooks_that_cannot_run(&policy.root);
     warn_about_unmatched(&policy, &found);
     warn_about_weaknesses(&policy, &found);
     // `status` is where someone checks whether they are actually covered, so the
@@ -904,6 +981,9 @@ pub fn hook_install(directory: &Path, agent: Agent, dry_run: bool) -> Result<Exi
     println!("it. Enforcement is `ralon run` — or `ralon guard` on Windows — which");
     println!("blocks processes, so it covers every agent, including the ones with no");
     println!("hooks at all.");
+    // The command whose entire purpose is those files is the last place that
+    // should let "installed" and "able to run" drift apart without saying so.
+    warn_about_hooks_that_cannot_run(&root);
     Ok(ExitCode::from(OK))
 }
 
@@ -1177,6 +1257,48 @@ fn warn_about_weaknesses(policy: &Policy, found: &[ProtectedPath]) {
     for finding in audit::audit(&policy.root, found) {
         eprintln!("ralon: warning: {} {}", finding.subject, finding.detail);
     }
+}
+
+/// A hook that is installed and cannot run.
+///
+/// The nastiest state this tool has, because every symptom points somewhere
+/// else. The hook entry is there, the supervisor is running, the files really
+/// are protected — and the agent gets `EBUSY: resource busy or locked` from the
+/// filesystem, concludes the repository is broken, and starts working around a
+/// policy it was never told about. Nothing failed loudly anywhere: a shell that
+/// cannot find `ralon` exits 1, and 1 is not the exit code that means "deny", so
+/// every agent treats it as a hook that declined to answer.
+///
+/// `status` is where somebody goes to find out whether they are covered, so this
+/// is one of the answers it owes them.
+fn warn_about_hooks_that_cannot_run(root: &Path) {
+    if !hook::installed_in(root) || hook::resolves().is_some() {
+        return;
+    }
+    let Ok(home) = registry::home() else {
+        return;
+    };
+
+    println!();
+    println!(
+        "The agent hooks in this project cannot run: `{}` is not on PATH.",
+        hook::PROGRAM
+    );
+    println!("Everything above is still protected — enforcement is in the kernel and");
+    println!("does not go through the hook. What is lost is the explanation:");
+    println!();
+    print_what_a_refusal_looks_like();
+    println!();
+    match service::stage::path(&home).parent() {
+        Some(directory) if service::CAN_EDIT_PATH => {
+            println!("  ralon install    puts {} on PATH", directory.display());
+        }
+        Some(directory) => {
+            println!("  export PATH=\"$PATH:{}\"", directory.display());
+        }
+        None => {}
+    }
+    print_the_repository();
 }
 
 fn warn_about_unmatched(policy: &Policy, found: &[ProtectedPath]) {

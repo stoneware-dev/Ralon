@@ -507,6 +507,71 @@ fn the_installed_hook_denies_and_allows_the_right_paths() {
     }
 }
 
+/// An installed hook that cannot run, which is worse than no hook at all.
+///
+/// Every hook entry invokes `ralon hook check` by name, because those files get
+/// committed and an absolute path would be one machine's home directory in
+/// everybody's repository. So if the name does not resolve, the shell exits 1 —
+/// and 1 is not the code any agent reads as "deny". The edit goes ahead, the
+/// kernel refuses it, and the developer is handed `EBUSY: resource busy or
+/// locked` about a repository that is working exactly as intended.
+///
+/// Nothing reported that state until this. It is reachable by ordinary means:
+/// `ralon install` stages its own copy of the binary so the package can be
+/// uninstalled, and uninstalling the package is what takes `ralon` off PATH.
+#[test]
+fn status_reports_a_hook_that_is_installed_but_cannot_run() {
+    let project = Project::new(Some(POLICY));
+    let home = project.root.join("state");
+    fs::create_dir_all(&home).unwrap();
+
+    let installed = project.run(&["hook", "install"]);
+    assert_eq!(code(&installed), 0, "{}", stderr(&installed));
+
+    let status = |path: &std::path::Path| -> Output {
+        Command::new(BINARY)
+            .arg("--dir")
+            .arg(&project.root)
+            .arg("status")
+            .env("RALON_HOME", &home)
+            .env("PATH", path)
+            .current_dir(&project.root)
+            .output()
+            .expect("failed to run ralon")
+    };
+
+    // Both streams: the explanation is advisory output like the rest of what
+    // `status` prints, and asserting on one stream would make this test pass or
+    // fail on where a message happens to be sent rather than on whether it is
+    // there at all.
+    let said = |output: &Output| format!("{}{}", stdout(output), stderr(output));
+
+    let nowhere = project.root.join("nowhere");
+    fs::create_dir_all(&nowhere).unwrap();
+    let reported = said(&status(&nowhere));
+    assert!(
+        reported.contains("not on PATH"),
+        "a hook that cannot run was not reported: {reported}"
+    );
+    // And it says what to do about it, rather than only that something is wrong.
+    assert!(
+        reported.contains("https://github.com/stoneware-dev/Ralon"),
+        "the explanation does not point anywhere: {reported}"
+    );
+
+    // The control, and the only reason the assertion above proves anything: the
+    // same project, with a PATH that does contain a `ralon`, must say nothing.
+    // Without this a version that warned unconditionally would pass.
+    let beside_the_binary = std::path::Path::new(BINARY)
+        .parent()
+        .expect("the test binary has a directory");
+    let reported = said(&status(beside_the_binary));
+    assert!(
+        !reported.contains("not on PATH"),
+        "warned about a `ralon` that is on PATH: {reported}"
+    );
+}
+
 /// Minimal JSON string escaping, so the test needs no dependency.
 fn serde_json_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
