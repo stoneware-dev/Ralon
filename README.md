@@ -98,7 +98,16 @@ $ ralon install --here         # this project is the whole scope
 `install` registers a per-user background supervisor with the operating system —
 a Task Scheduler logon task on Windows, a launchd LaunchAgent on macOS. No
 administrator, no root, and it comes back after a reboot because the operating
-system starts it.
+system starts it. Re-running it is safe: scopes are additive and nothing is
+duplicated.
+
+It registers a *copy* of the binary in its own state directory, not wherever
+`cargo`/`npm`/`pip` happened to put the one you ran — so a running supervisor
+never makes its own package impossible to uninstall, and removing that package
+never strands the registration. On Windows it also adds that directory to your
+`PATH`, because the agent hooks it writes invoke `ralon` by name; those files get
+committed, so they cannot hard-code one machine's path, which means the name has
+to resolve. Open a fresh terminal after installing for the `PATH` change to take.
 
 **Where Ralon is installed has nothing to do with what it protects.** On a first
 run with no scope given it takes your home directory, because that is right often
@@ -163,6 +172,16 @@ $ ralon uninstall              # deregister, and hand every project back
 it, and does mean you cannot edit your own policy while it is enforced. A pause
 expires on its own by default: a pause that is forgotten about is a project that
 stopped being protected without anyone deciding it should.
+
+**Run `ralon uninstall` before removing the package.** It stops the supervisor,
+hands every project back, and removes the staged binary and the `PATH` entry. The
+supervisor is a background process the operating system starts, and no package
+manager knows it exists — `npm` stopped running `preuninstall` scripts, and `pip`
+and `cargo` never had the hook — so removing the `ralon`/`ralonlock` package first
+leaves it running with nothing left to stop it, and on Windows leaves a file the
+package manager cannot delete because a live process is mapped from it. That is
+the "I had to kill it in Task Manager and delete the folder by hand" failure, and
+`ralon uninstall` is how you avoid it.
 
 ### Why `agent.lock` is what activates it
 
