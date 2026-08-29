@@ -337,6 +337,39 @@ One `ralon hook check` serves all nine: the refusal is a single JSON document
 carrying every one of those keys, plus exit code 2, since emitting a key an agent
 ignores costs nothing and omitting one it needs is an edit waved through.
 
+### One denied edit is not a denied session
+
+A refusal ends the **tool call**, not the agent. Ralon starts nothing, kills
+nothing, and holds no state across calls: `hook check` is a short-lived process
+whose exit code answers one question. An agent told "no" about `.env` is expected
+to carry on with the files it *is* allowed to change, and the refusal says so in
+as many words.
+
+A tool call naming several files is refused **as a whole** if any one of them is
+protected — and that is deliberate, not a limitation being worked around. Ralon
+cannot reach inside a tool call to apply two edits out of three, so allowing the
+rest would mean assuming the tool applies its edits independently; assume wrong
+and a protected file gets written. Refusing the call writes nothing, and the
+message tells the agent exactly how to proceed:
+
+```text
+2 paths in this request are protected by Ralon and writes to them are refused:
+`.env` (matches `.env`), `config/db.yaml` (matches `config/**`). This tool call
+was refused as a whole, so nothing in it was modified — including any paths in
+it that are not protected. Re-issue it without the protected paths, and the rest
+of the work will go through.
+```
+
+**Every** protected path in the request is named, not just the first, so the
+agent can correct itself in one attempt instead of one per protected file. The
+same list is in the JSON as `protectedPaths` (`{"path", "pattern"}`) for agents
+that would rather read a field than a sentence — an extra key, which agents that
+do not know it ignore.
+
+Separate tool calls are independent: `edit A`, `edit .env`, `edit B` allows A,
+refuses `.env`, and allows B. That is the shape most agents use, and it is the
+one where Ralon can refuse the least.
+
 Every entry names the **program**, not a path — these files get committed, and an
 absolute path would be one developer's machine in everybody's repository. So the
 name has to resolve: `ralon install` appends its own directory to your `PATH` on

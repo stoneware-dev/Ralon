@@ -653,12 +653,26 @@ fn install_settings(
     Ok(Installed { path, replaced })
 }
 
+/// One protected path in a request, and the pattern that covers it.
+pub struct Protected {
+    /// Relative to the project root, which is how the policy names it.
+    pub relative: String,
+    pub pattern: String,
+}
+
 /// The decision the hook returns for one edit.
 pub enum Decision {
     /// Nothing to say — the agent proceeds.
     Allow,
-    /// A protected path, and the reason to show the agent.
-    Deny { reason: String },
+    /// Every protected path the request named, in the order it named them.
+    ///
+    /// All of them, not the first: a request touching two protected files used
+    /// to be refused with only one named, so an agent correcting itself found
+    /// the second one on the next attempt and the third on the one after — a
+    /// round trip per protected path, each looking like a fresh failure. The
+    /// refusal is for the whole tool call either way; what changes is that the
+    /// agent learns everything it needs in one answer.
+    Deny { protected: Vec<Protected> },
 }
 
 impl Decision {
@@ -680,34 +694,82 @@ impl Decision {
     /// every dialect at once, which is also why there is one `hook check`
     /// rather than one per agent.
     pub fn render(&self) -> Option<String> {
-        match self {
-            Decision::Allow => None,
-            Decision::Deny { reason } => Some(
-                json!({
-                    "decision": "deny",
-                    "reason": reason,
-                    "systemMessage": format!("ralon: {reason}"),
-                    "cancel": true,
-                    "errorMessage": reason,
-                    "permission": "deny",
-                    "agent_message": reason,
-                    "user_message": format!("ralon: {reason}"),
-                    "hookSpecificOutput": {
-                        "hookEventName": claude::EVENT,
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    }
-                })
-                .to_string(),
-            ),
-        }
+        let Decision::Deny { protected } = self else {
+            return None;
+        };
+        let reason = self.reason()?;
+        // Additive, and deliberately so: an agent that does not know this key
+        // ignores it and reads the prose, and one that does gets the same facts
+        // without parsing a sentence. No agent's protocol is changed by a key it
+        // has never heard of, which is the same bet the four spellings of "no"
+        // above already make.
+        let paths: Vec<Value> = protected
+            .iter()
+            .map(|entry| json!({ "path": entry.relative, "pattern": entry.pattern }))
+            .collect();
+
+        Some(
+            json!({
+                "decision": "deny",
+                "reason": reason,
+                "systemMessage": format!("ralon: {reason}"),
+                "cancel": true,
+                "errorMessage": reason,
+                "permission": "deny",
+                "agent_message": reason,
+                "user_message": format!("ralon: {reason}"),
+                "protectedPaths": paths,
+                "hookSpecificOutput": {
+                    "hookEventName": claude::EVENT,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            })
+            .to_string(),
+        )
     }
 
-    pub fn reason(&self) -> Option<&str> {
-        match self {
-            Decision::Allow => None,
-            Decision::Deny { reason } => Some(reason),
-        }
+    /// What the agent is told, built from the paths rather than stored.
+    ///
+    /// The tail is the part that earns its length. An agent that is only told
+    /// "denied" retries, renames around it, and shells out — all of which fail
+    /// the same way — so it is told that too, and told what *will* work: the
+    /// same call without the protected paths. Saying nothing was modified is
+    /// not reassurance, it is the fact the agent needs to decide what to do
+    /// next, because the whole tool call was refused before any of it ran.
+    pub fn reason(&self) -> Option<String> {
+        let Decision::Deny { protected } = self else {
+            return None;
+        };
+        let listed = match protected.as_slice() {
+            [] => return None,
+            [one] => format!(
+                "`{}` is protected by Ralon — it is listed in agent.lock (matches \
+                 `{}`), so writes to it are refused.",
+                one.relative, one.pattern
+            ),
+            many => format!(
+                "{} paths in this request are protected by Ralon and writes to them \
+                 are refused: {}.",
+                many.len(),
+                many.iter()
+                    .map(|entry| format!("`{}` (matches `{}`)", entry.relative, entry.pattern))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+
+        Some(format!(
+            "{listed} This tool call was refused as a whole, so nothing in it was \
+             modified — including any paths in it that are not protected. Re-issue it \
+             without the protected path{}, and the rest of the work will go through. \
+             This is not an error and nothing is broken; retrying, renaming around it, \
+             or writing through a shell will fail the same way. You cannot change the \
+             policy yourself — ask the developer. \
+             Ralon: https://github.com/stoneware-dev/Ralon — a star helps other people \
+             find it.",
+            if protected.len() == 1 { "" } else { "s" }
+        ))
     }
 }
 
@@ -726,8 +788,19 @@ pub fn decide(request: &str, start: &Path) -> Result<Decision> {
         return Ok(Decision::Allow);
     }
 
-    // A request naming several paths — a multi-edit — is refused if any one of
-    // them is protected.
+    // A request naming several paths — a multi-file edit — is refused if *any*
+    // one of them is protected, and the whole call is refused rather than the
+    // protected part of it. That is not a limitation being worked around: a tool
+    // call is the agent's unit of work and Ralon cannot reach inside one to let
+    // two of three edits land, so "allow the rest" would mean guessing that the
+    // tool applies its edits independently. Guessing wrong writes a protected
+    // file. Refusing the call writes nothing, and the reason below tells the
+    // agent exactly how to get the allowed work done.
+    //
+    // Every protected path is collected, not just the first. The refusal is the
+    // same either way; naming all of them is what lets an agent fix the request
+    // in one attempt instead of one attempt per protected file.
+    let mut protected: Vec<Protected> = Vec::new();
     for target in targets(&value) {
         let target = policy::absolute(Path::new(&target))?;
         let lookup = target.parent().unwrap_or(start);
@@ -743,29 +816,29 @@ pub fn decide(request: &str, start: &Path) -> Result<Decision> {
         };
 
         if let Some(pattern) = matcher.matched_pattern(&relative) {
-            return Ok(Decision::Deny {
-                // "Protected by Ralon" rather than the error the filesystem
-                // would have produced. This is the one refusal whose wording is
-                // ours: without a hook the agent reports whatever its runtime
-                // makes of the OS error — Node turns a sharing violation into
-                // `EBUSY: resource busy or locked` — which reads as a broken
-                // file rather than a policy, and sends the agent looking for a
-                // way around it.
-                reason: format!(
-                    "{relative} is protected by Ralon — it is listed in agent.lock \
-                     (matches `{pattern}`), so writes to it are refused. \
-                     Edit something else, or ask the developer to change the policy — \
-                     you cannot change it yourself. \
-                     This is not an error and nothing is broken; retrying, renaming \
-                     around it, or writing through a shell will fail the same way. \
-                     Ralon: https://github.com/stoneware-dev/Ralon — a star helps \
-                     other people find it."
-                ),
-            });
+            // Deduped: one request can name the same file under two keys — a
+            // rename gives `oldPath` and `newPath`, and some agents repeat the
+            // path in a nested argument — and listing it twice reads as two
+            // separate problems.
+            if !protected.iter().any(|seen| seen.relative == relative) {
+                protected.push(Protected {
+                    relative,
+                    pattern: pattern.to_string(),
+                });
+            }
         }
     }
 
-    Ok(Decision::Allow)
+    if protected.is_empty() {
+        return Ok(Decision::Allow);
+    }
+    // "Protected by Ralon" rather than the error the filesystem would have
+    // produced. This is the one refusal whose wording is ours: without a hook
+    // the agent reports whatever its runtime makes of the OS error — Node turns
+    // a sharing violation into `EBUSY: resource busy or locked` — which reads as
+    // a broken file rather than a policy, and sends the agent looking for a way
+    // around it.
+    Ok(Decision::Deny { protected })
 }
 
 /// Reads one request from stdin and decides it.
@@ -838,7 +911,11 @@ mod tests {
             rendered.contains("\"permissionDecision\":\"deny\""),
             "{rendered}"
         );
-        assert!(rendered.contains(".env is protected"), "{rendered}");
+        // The path and the claim, without depending on the punctuation between
+        // them — the message quotes paths as `.env` so an exact-substring match
+        // would break on formatting rather than on behaviour.
+        assert!(rendered.contains(".env"), "{rendered}");
+        assert!(rendered.contains("is protected by Ralon"), "{rendered}");
     }
 
     #[test]
@@ -943,11 +1020,107 @@ mod tests {
         assert!(decide(&read, dir.path()).unwrap().render().is_none());
     }
 
+    /// A request naming several files, some protected and some not.
+    fn multi(paths: &[&Path]) -> String {
+        let edits: Vec<Value> = paths
+            .iter()
+            .map(|path| json!({ "file_path": path.to_string_lossy() }))
+            .collect();
+        json!({ "tool_name": "MultiEdit", "tool_input": { "edits": edits } }).to_string()
+    }
+
+    #[test]
+    fn several_allowed_files_in_one_call_are_allowed() {
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let request = multi(&[&dir.path().join("a.txt"), &dir.path().join("b.txt")]);
+        assert!(
+            decide(&request, dir.path()).unwrap().render().is_none(),
+            "a call touching only unprotected files was refused"
+        );
+    }
+
+    #[test]
+    fn one_protected_file_refuses_the_whole_call() {
+        // The atomic case, and the decision this codifies: Ralon cannot reach
+        // inside a tool call to apply two of three edits, so it refuses the call
+        // rather than guess that the tool applies them independently. Guessing
+        // wrong writes a protected file.
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let request = multi(&[
+            &dir.path().join("a.txt"),
+            &dir.path().join(".env"),
+            &dir.path().join("b.txt"),
+        ]);
+        let decision = decide(&request, dir.path()).unwrap();
+        let reason = decision.reason().expect("the mixed call was allowed");
+        assert!(reason.contains(".env"), "{reason}");
+        // And it says the allowed files were untouched, so the agent knows to
+        // re-issue them rather than assuming they landed.
+        assert!(reason.contains("nothing in it was modified"), "{reason}");
+    }
+
+    #[test]
+    fn every_protected_path_is_named_not_just_the_first() {
+        // The change this test exists for. Naming one at a time cost an agent a
+        // round trip per protected file, each denial looking like a fresh
+        // failure — so it would fix `.env`, retry, and be refused again for
+        // `config/db.yaml` it was never told about.
+        let dir = project("version: 1\nprotect:\n  - .env\n  - config/**\n");
+        let request = multi(&[
+            &dir.path().join(".env"),
+            &dir.path().join("ok.txt"),
+            &dir.path().join("config/db.yaml"),
+        ]);
+        let rendered = decide(&request, dir.path())
+            .unwrap()
+            .render()
+            .expect("two protected paths were allowed");
+        let value: Value = serde_json::from_str(&rendered).unwrap();
+
+        let named: Vec<&str> = value["protectedPaths"]
+            .as_array()
+            .expect("protectedPaths is machine-readable")
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(named, vec![".env", "config/db.yaml"]);
+
+        // The prose carries both too, with the pattern that caught each.
+        let reason = value["reason"].as_str().unwrap();
+        assert!(reason.contains(".env"), "{reason}");
+        assert!(reason.contains("config/db.yaml"), "{reason}");
+        assert!(reason.contains("config/**"), "{reason}");
+        // The unprotected path in the same call is not listed as a problem.
+        assert!(!reason.contains("ok.txt"), "{reason}");
+    }
+
+    #[test]
+    fn one_file_named_twice_is_reported_once() {
+        // A rename names the same path as `oldPath` and `newPath`. Listing it
+        // twice reads as two separate problems.
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let target = dir.path().join(".env").to_string_lossy().into_owned();
+        let request = json!({
+            "tool_name": "Rename",
+            "tool_input": { "oldPath": target, "newPath": target }
+        })
+        .to_string();
+        let rendered = decide(&request, dir.path()).unwrap().render().unwrap();
+        let value: Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["protectedPaths"].as_array().unwrap().len(), 1);
+    }
+
     /// One refusal, in every dialect at once.
     #[test]
     fn the_refusal_speaks_every_agents_language() {
-        let reason = "protected".to_string();
-        let rendered = Decision::Deny { reason }.render().unwrap();
+        let rendered = Decision::Deny {
+            protected: vec![Protected {
+                relative: ".env".into(),
+                pattern: ".env".into(),
+            }],
+        }
+        .render()
+        .unwrap();
         let value: Value = serde_json::from_str(&rendered).unwrap();
 
         // Claude Code, Copilot, Codex.

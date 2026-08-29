@@ -575,6 +575,133 @@ fn status_reports_a_hook_that_is_installed_but_cannot_run() {
     );
 }
 
+/// Runs one hook request and returns (exit code, stdout).
+fn hook(project: &Project, request: &str) -> (i32, String) {
+    let mut child = Command::new(BINARY)
+        .arg("--dir")
+        .arg(&project.root)
+        .args(["hook", "check"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(request.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    (code(&output), stdout(&output))
+}
+
+fn write_request(paths: &[std::path::PathBuf]) -> String {
+    let edits: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            format!(
+                r#"{{"file_path":{}}}"#,
+                serde_json_string(&path.to_string_lossy())
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"tool_name":"MultiEdit","tool_input":{{"edits":[{}]}}}}"#,
+        edits.join(",")
+    )
+}
+
+/// A denied edit is a denied *edit* — not a denied session.
+///
+/// The failure this guards against is the one that makes a policy tool
+/// unusable: an agent asked to touch three files, one of them protected, and the
+/// whole run ends. Ralon refuses the tool call and nothing else — it does not
+/// stop the agent, does not release the guard, and does not stop enforcing. The
+/// agent is expected to carry on with the work it is allowed to do, so the test
+/// carries on the same way and checks that it can.
+#[test]
+fn a_denial_refuses_the_operation_and_nothing_else() {
+    let project = Project::new(Some(POLICY));
+    let secret = project.write(".env", "SECRET=original\n");
+    let allowed = project.write("src/App.tsx", "original\n");
+
+    // 1. An allowed file, on its own: permitted.
+    let (allowed_first, _) = hook(&project, &write_request(std::slice::from_ref(&allowed)));
+    assert_eq!(allowed_first, 0, "an unprotected file was refused");
+
+    // 2. A protected file: refused, and every protected path in the request is
+    //    named so the agent can fix it in one attempt.
+    let mixed = write_request(&[
+        allowed.clone(),
+        secret.clone(),
+        project.root.join("config/db.yaml"),
+    ]);
+    let (denied, said) = hook(&project, &mixed);
+    assert_eq!(denied, 2, "a protected path was not refused: {said}");
+    assert!(said.contains(".env"), "{said}");
+    assert!(
+        said.contains("config/db.yaml"),
+        "only the first protected path was named: {said}"
+    );
+    assert!(
+        said.contains("nothing in it was modified"),
+        "the refusal does not say the allowed paths were left alone: {said}"
+    );
+
+    // 3. Nothing was written — not the protected file, and not the allowed one
+    //    that shared the refused call. Read back, never inferred from an exit
+    //    code, because that is the claim the message makes to the agent.
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "SECRET=original\n");
+    assert_eq!(fs::read_to_string(&allowed).unwrap(), "original\n");
+
+    // 4. The agent continues. The same allowed edit, after the denial, is still
+    //    permitted — the denial did not poison the session, and the hook process
+    //    exiting 2 was an answer about one call rather than a failure.
+    let (allowed_after, _) = hook(&project, &write_request(std::slice::from_ref(&allowed)));
+    assert_eq!(
+        allowed_after, 0,
+        "an allowed edit was refused after an unrelated denial"
+    );
+
+    // 5. And the policy is still being enforced afterwards, rather than having
+    //    been spent on the refusal.
+    let (still_denied, _) = hook(&project, &write_request(&[secret]));
+    assert_eq!(
+        still_denied, 2,
+        "the protected path stopped being protected"
+    );
+}
+
+/// The same sequence with real enforcement underneath it: a hook denial must not
+/// disturb the guard holding the files.
+#[test]
+#[cfg(windows)]
+fn a_denial_leaves_the_guard_running_and_enforcing() {
+    let project = Project::new(Some(POLICY));
+    let secret = project.write(".env", "SECRET=original\n");
+
+    let started = project.run(&["guard", "--detach"]);
+    assert_eq!(code(&started), 0, "{}", stderr(&started));
+
+    let (denied, _) = hook(&project, &write_request(std::slice::from_ref(&secret)));
+
+    // The guard is still there, and still refusing an unwrapped process — the
+    // filesystem half is untouched by anything the hook decided.
+    let status = stdout(&project.run(&["status"]));
+    project.shell("echo hacked > .env");
+    let held = fs::read_to_string(&secret).unwrap() == "SECRET=original\n";
+
+    let stopped = project.run(&["guard", "--stop"]);
+    assert_eq!(denied, 2, "the hook allowed a protected write");
+    assert!(
+        status.contains("guard      running"),
+        "the guard stopped after a hook denial: {status}"
+    );
+    assert!(held, "enforcement lapsed after a hook denial");
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+}
+
 /// Minimal JSON string escaping, so the test needs no dependency.
 fn serde_json_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");

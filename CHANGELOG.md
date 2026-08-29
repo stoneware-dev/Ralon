@@ -64,6 +64,21 @@ binary.
   exposed ancestors were reported by `check` and `status` — commands a person
   runs — while under the supervisor nobody runs anything. They now go to the log
   as each project starts being enforced.
+- **A refusal names every protected path in the request, not just the first.** A
+  tool call touching two protected files was refused with one of them named, so
+  an agent correcting itself was refused again for the second on the next
+  attempt and the third on the one after — a round trip per protected file, each
+  denial looking like a fresh failure. All of them are now listed, in the prose
+  and in a `protectedPaths` array (`{"path", "pattern"}`) for agents that would
+  rather read a field than a sentence. The refusal also now says that nothing in
+  the call was modified — *including* the unprotected paths that shared it — and
+  to re-issue it without the protected ones, which is the thing an agent
+  otherwise has to guess. What has not changed: a call naming any protected path
+  is still refused as a whole, because Ralon cannot apply two edits out of three
+  and guessing that a tool applies them independently would write a protected
+  file. Separate tool calls remain independent — `edit A`, `edit .env`, `edit B`
+  allows A, refuses `.env`, allows B — and a refusal has never stopped an agent
+  or released a guard.
 - **Hooks are written only for the agents you use.** Installing a policy used to
   drop nine agent configuration files into every project — `.claude`, `.cursor`,
   `.codex` and six more — regardless of which tools you have. The new default,
