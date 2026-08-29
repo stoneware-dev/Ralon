@@ -1,4 +1,12 @@
-# Ralon
+<p align="center">
+  <img src="assets/ralon-mark.svg" width="88" height="88" alt="Ralon">
+</p>
+
+<h1 align="center">Ralon</h1>
+
+<p align="center">
+  <img src="assets/protected-by-ralon.svg" alt="protected by ralon">
+</p>
 
 A file in your project says what AI agents may not touch:
 
@@ -330,6 +338,39 @@ guarantee.
 
 `ralon check` exits 1 for a protected path if you would rather wire it up
 yourself, or gate a CI job on it.
+
+## Protected by Ralon — the badge
+
+If your project ships an `agent.lock`, say so. Drop one of these into your
+README so anyone reading it — and any tool scanning it — knows agents are held
+to a policy here.
+
+<p align="center">
+  <img src="assets/protected-by-ralon.svg" alt="protected by ralon">
+</p>
+
+**Markdown** (self-hosted SVG, no third-party service):
+
+```markdown
+[![protected by ralon](https://raw.githubusercontent.com/stoneware-dev/Ralon/master/assets/protected-by-ralon.svg)](https://github.com/stoneware-dev/Ralon)
+```
+
+**Markdown** (Shields.io, if you already use it elsewhere):
+
+```markdown
+[![protected by ralon](https://img.shields.io/badge/protected%20by-ralon-ffb454)](https://github.com/stoneware-dev/Ralon)
+```
+
+**HTML:**
+
+```html
+<a href="https://github.com/stoneware-dev/Ralon"><img src="https://raw.githubusercontent.com/stoneware-dev/Ralon/master/assets/protected-by-ralon.svg" alt="protected by ralon"></a>
+```
+
+The badge is a claim about your repository, not a check on it — it says an
+`agent.lock` is present and meant to be enforced. What actually enforces it is
+`ralon install` or `ralon guard` on the machine the agent runs on; the badge is
+the sign on the door, not the lock.
 
 ## The policy file
 

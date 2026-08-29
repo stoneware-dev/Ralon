@@ -76,6 +76,10 @@ const PIPE_WAIT: u32 = 0x0000_0000;
 
 const INVALID_HANDLE: Handle = -1isize as Handle;
 const ERROR_ACCESS_DENIED: u32 = 5;
+/// What Windows returns when an open is refused because an existing handle's
+/// share mode forbids it — i.e. the guard's own locks refusing a writer. It is
+/// the whole of `running`, so it is the whole of "is this project protected".
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE_ACCESS: u32 = 0x4000_0000;
@@ -276,6 +280,18 @@ pub fn start(root: &Path, plan: &Plan) -> Result<Session> {
 /// Asks a running guard to release. `false` means there was none.
 pub fn stop(root: &Path) -> Result<bool> {
     if !running(root) {
+        // Nothing holds the locks. A guard — current or legacy — always would,
+        // so what is left is either a clean project or a process squatting the
+        // claim pipe while protecting nothing, and a squatter needs no stopping.
+        // The legacy path opens an *event*, which a squatter never created, so it
+        // reports `false` here rather than being fooled the way the pipe was.
+        return stop_a_guard_from_before_the_pipe(root);
+    }
+
+    // The locks are held. A current guard also holds a claim pipe and is woken by
+    // connecting to it; a guard from before the pipe holds the same locks with
+    // none, so reach it through its event instead.
+    if !claim_pipe_present(root) {
         return stop_a_guard_from_before_the_pipe(root);
     }
 
@@ -318,21 +334,56 @@ pub fn stop(root: &Path) -> Result<bool> {
     anyhow::bail!("a guard was asked to stop and is still holding this project")
 }
 
-/// Whether a guard currently holds this project.
+/// Whether a guard currently holds this project — the *property*, not a proxy.
 ///
-/// This has to *observe* the claim without taking it and without connecting to
-/// it, which rules out both of the obvious implementations. Trying to create the
-/// pipe would mean the caller briefly holds the claim — and `detach` polls this
-/// in a loop while the guard it just spawned is racing to claim, so the poller
-/// wins, the real guard is refused as a duplicate, and a working guard reports
-/// "never claimed the project". (Written that way first; the CLI test caught it
-/// immediately.) Opening it as a client is worse: connecting is how `stop` asks
-/// a guard to release, so asking whether one is running would stop it.
+/// A guard holds `agent.lock`, which every policy protects whether or not it
+/// says so, with `FILE_SHARE_READ`: readers pass, and any attempt to open it
+/// for writing is refused with a sharing violation, for every process on the
+/// machine. So opening it for write and seeing that refusal *is* the question,
+/// answered against the thing that actually protects the project.
 ///
-/// `WaitNamedPipeW` is the call that answers the question and does neither.
+/// This used to ask the claim pipe — `WaitNamedPipeW` on the name in
+/// [`claim_name`] — whether an instance existed. That was spoofable, and by the
+/// worst party: the name is a hash of the path, computable from this source, so
+/// any same-user process could create a pipe of that name and hold nothing. It
+/// showed `status` a running guard over a writable file and, worse, made the
+/// supervisor record the project `enforced` and never start a real guard —
+/// silent non-enforcement that no respawn recovered, because the check the
+/// respawn depends on was the one being fooled. A share-mode lock cannot be
+/// faked the same way: a process that makes this open fail is holding the file,
+/// which is the protection, not a claim to it. This is the same move macOS
+/// already makes — its `running` reads the immutable flag on `agent.lock`, the
+/// property, not a note about it.
+///
+/// The pipe still exists, and is still how `stop` reaches a guard; it just no
+/// longer stands in for enforcement. Probing the *file* holds no claim and
+/// connects to nothing, so neither of the old objections — that testing by
+/// creating the pipe made the poller race the guard for the claim, or that
+/// connecting to it as a client would trip the stop rendezvous — applies here.
 pub fn running(root: &Path) -> bool {
-    /// Return straight away rather than waiting for the server's default
-    /// timeout — this is a question, not an attempt to connect.
+    let policy = root.join(crate::policy::POLICY_FILE);
+    match std::fs::OpenOptions::new().write(true).open(&policy) {
+        // Opened for write: nothing is holding it, so nothing is guarding this
+        // project. The handle is dropped at the end of the match, unwritten.
+        Ok(_probe) => false,
+        // Refused by a share mode: a guard holds the file. Any other error — the
+        // file is absent, or read-only — is not evidence of a lock and is not a
+        // running guard.
+        Err(error) => error.raw_os_error() == Some(ERROR_SHARING_VIOLATION),
+    }
+}
+
+/// Whether this project's claim pipe currently exists.
+///
+/// Not "is a guard running" — that is [`running`], and the whole point of this
+/// change is that the two are different questions. This one only decides *how*
+/// to signal a guard that [`running`] has already confirmed is there: a current
+/// guard carries a claim pipe and is woken by connecting to it, while one from
+/// before the pipe existed holds the same locks with no pipe and is woken
+/// through its legacy event instead.
+fn claim_pipe_present(root: &Path) -> bool {
+    /// Answer at once rather than waiting for the server's timeout — this asks
+    /// whether the name exists, it is not an attempt to connect.
     const NMPWAIT_NOWAIT: u32 = 1;
 
     unsafe { WaitNamedPipeW(claim_name(root).as_ptr(), NMPWAIT_NOWAIT) != 0 }
@@ -577,6 +628,80 @@ mod tests {
     #[test]
     fn different_projects_do_not_share_a_claim() {
         assert_ne!(name_of("D:\\projects\\app"), name_of("D:\\projects\\other"));
+    }
+
+    #[test]
+    fn a_claim_pipe_without_the_locks_is_not_a_running_guard() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // The share mode a guard holds its files with: readers pass, writers are
+        // refused. Local to the test because that is the only place that plays a
+        // guard; `running` needs the *result* of this mode, not the mode.
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+        // The squat, in one function. The claim pipe's name is a hash of the
+        // path, computed by `claim_name` right here — so any process can create
+        // one and hold nothing. A `running` that trusted the pipe showed a guard
+        // over a writable file and made the supervisor skip starting a real one.
+        let dir = std::env::temp_dir().join(format!("ralon-squat-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy = dir.join(crate::policy::POLICY_FILE);
+        std::fs::write(&policy, "protect:\n  - .env\n").unwrap();
+
+        // Control. Nothing holds the project: not running, and agent.lock is
+        // writable — proved by writing it, not by an exit code.
+        assert!(
+            !running(&dir),
+            "a guard was reported with nothing holding it"
+        );
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&policy)
+                .is_ok(),
+            "the control is wrong: agent.lock was not writable to begin with"
+        );
+
+        // The attack: hold the claim pipe and only the claim pipe.
+        let squat = create_claim(&dir);
+        assert_ne!(squat, INVALID_HANDLE, "could not create the claim to squat");
+        assert!(
+            claim_pipe_present(&dir),
+            "the squat did not actually take the pipe, so the test proves nothing"
+        );
+        assert!(
+            !running(&dir),
+            "a claim pipe with no locks was mistaken for a running guard — the squat"
+        );
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&policy)
+                .is_ok(),
+            "agent.lock was not writable while only the pipe was held — \
+             the pipe must protect nothing"
+        );
+        unsafe { CloseHandle(squat) };
+
+        // Positive: a genuine guard holds agent.lock with FILE_SHARE_READ, and
+        // that lock — the property — is exactly what `running` now reports.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&policy)
+            .unwrap();
+        assert!(
+            running(&dir),
+            "a genuinely locked agent.lock was not seen as a running guard"
+        );
+        drop(held);
+        assert!(
+            !running(&dir),
+            "the lock was released and `running` still reported a guard"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -134,8 +134,24 @@ binary.
 
 ### Security
 
-No bypass of a protected path. Three weaknesses in what surrounds one, all on
+No bypass of a protected path. Four weaknesses in what surrounds one, all on
 Windows, all present since the supervisor arrived in `0.1.6`:
+
+- **A guard could be shown as running when it was not — the claim squat.** "Is a
+  guard running" was answered by whether its claim pipe existed, and the pipe's
+  name is a hash of the project path computed in open source. So any process
+  running as you could create a pipe of that name and hold nothing: `status`
+  reported a running guard over a writable file, and — the real harm — the
+  supervisor recorded the project `enforced` and never started a real guard,
+  because the respawn's own check was the one being spoofed. Killing a guard and
+  squatting its claim turned the documented, self-healing "a guard can be killed"
+  into silent, permanent, mis-reported non-enforcement. `running` now opens
+  `agent.lock` for writing and asks whether the file refuses it — a share-mode
+  lock cannot be faked without holding the file, at which point the holder *is*
+  protecting it. A same-user process can still deny protection (kill the guard,
+  squat the name), but it now surfaces as a workspace the supervisor reports it
+  cannot enforce, not one it falsely believes it holds. Regression test in
+  `enforce/windows/guard.rs`; the pipe remains only as the `--stop` rendezvous.
 
 - **Ralon's own binary and scope list were unprotected while it ran.** Replacing
   `bin\ralon.exe` took over the supervisor at the next logon; deleting a line
@@ -152,7 +168,8 @@ Windows, all present since the supervisor arrived in `0.1.6`:
   exposed ancestors were printed by commands a person runs, and the supervisor
   runs none. They now go to `supervisor.log` as each project starts.
 
-`ralon run` is unaffected by all three.
+`ralon run` is unaffected by all four — it holds the locks in the process it
+started and consults no claim to know they are held.
 
 ## 0.1.6
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Ralon">
+  <rect width="200" height="200" rx="38" fill="#0a0b0d"/>
+  <g fill="none" stroke="#ffb454" stroke-width="14" stroke-linecap="round">
+    <path d="M67 88V64a33 24 0 0 1 66 0v24"/>
+    <rect x="41" y="86" width="118" height="72" rx="13"/>
+    <path d="M100 113v20"/>
+  </g>
+</svg>

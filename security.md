@@ -35,6 +35,17 @@ exact:
   IPC-reachable writer alongside an agent you do not trust. On Windows this is
   what `ralon guard` exists for: it refuses every process, so the daemon is
   covered too.
+- **Killing or blocking a guard** — but not silently. On Windows a guard is a
+  process, and a process running as you can terminate it, suspend it (its handles
+  survive suspension, so the locks hold until it actually dies), or squat its
+  claim so a fresh one cannot start. That is the same boundary that lets an agent
+  run `ralon scope remove`: there is no password by design. Two things it is
+  *not*. It is not a way to modify a protected path while a guard is up — the
+  locks refuse that regardless. And it is not silent: `status` reports whether the
+  files are actually locked, not whether a claim exists, so a killed guard reads
+  as gone and the supervisor starts another. See *Lifetime* and *The record is
+  not evidence* for why that distinction is load-bearing and how it was almost
+  lost.
 - **Reading.** Protected files stay readable, deliberately: `agent.lock`
   declares what must not *change*. A secret an agent must not read does not
   belong in the project directory.
@@ -335,6 +346,23 @@ child to put in a job, so killing a guard leaves the agent running with the
 files writable; `status` says whether one is running, which is the only
 notice there can be.
 
+That last sentence is only worth anything if `status` cannot be lied to, and for
+a while it could. "Is a guard running" was answered by whether the guard's claim
+existed — a named pipe under `\\.\pipe\ralon-guard-<hash>`. The hash is of the
+project path and is computed in open source, so *any* process running as you
+could create a pipe of that name and hold nothing else: `status` would report a
+running guard over a writable file, and — worse — the supervisor would record the
+project `enforced` and never start a real guard, because the check its respawn
+depends on was the one being fooled. A claim is a promise; a lock is a fact.
+`running` now opens `agent.lock` for writing and asks whether the *file* refuses
+it. A share-mode lock cannot be faked without holding the file, and a process
+holding the file that way is protecting it — so the only way to make this report
+a guard is to be one. The pipe still exists, as the rendezvous `--stop` connects
+to; it just no longer stands in for the thing it was meant to prove.
+`tests/enforcement`-style coverage lives beside the code, in
+`enforce/windows/guard.rs`: a pipe held with no locks must read as *not running*,
+and a genuinely locked file must read as running.
+
 ## The supervisor
 
 `ralon install` registers a per-user background process that starts enforcement
@@ -435,7 +463,12 @@ enforcement.
   load-bearing on Windows: enforcement lives in a process, so a reboot ends all of
   it while the file still says `enforced`, and a supervisor that believed its own
   notes would come up, agree with itself, and protect nothing. The same check
-  restores a guard that was killed.
+  restores a guard that was killed — provided the check reads the *lock* and not a
+  claim that a killed guard's replacement could be prevented from ever taking. It
+  does; see *Lifetime* for the squat that made this precise. What a same-user
+  process can still do is *deny* — kill the guard and squat its claim so the next
+  one cannot start — and that now surfaces as a workspace the supervisor reports
+  it *cannot* enforce, logged, rather than one it falsely believes it has.
 - **State is per-user and outside the repository.** `agent.lock` is never written
   to. Everything the supervisor learns lives in its own state directory.
 
