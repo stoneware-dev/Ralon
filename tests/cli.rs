@@ -446,7 +446,10 @@ fn run_refuses_rather_than_running_unprotected_when_the_backend_is_unavailable()
 fn hook_install_writes_a_hook_that_refuses_protected_paths() {
     let project = Project::new(Some(POLICY));
 
-    let installed = project.run(&["hook", "install"]);
+    // `--agent claude` because this test is about Claude's file specifically; the
+    // bare default is `auto`, which writes only the agents the machine uses and
+    // would make the assertion depend on what is installed on it.
+    let installed = project.run(&["hook", "install", "--agent", "claude"]);
     assert_eq!(code(&installed), 0, "{}", stderr(&installed));
 
     let settings = fs::read_to_string(project.root.join(".claude/settings.json")).unwrap();

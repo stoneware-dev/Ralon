@@ -64,6 +64,17 @@ binary.
   exposed ancestors were reported by `check` and `status` — commands a person
   runs — while under the supervisor nobody runs anything. They now go to the log
   as each project starts being enforced.
+- **Hooks are written only for the agents you use.** Installing a policy used to
+  drop nine agent configuration files into every project — `.claude`, `.cursor`,
+  `.codex` and six more — regardless of which tools you have. The new default,
+  `--agent auto`, writes only the agents with a configuration directory in the
+  project or your home directory, so a repo opened with Cursor gets one file, not
+  nine to explain in review. `--agent all` still forces every one for a tool you
+  have not opened the project with yet; detection falls back to all when it finds
+  nothing, so a project is never left without the message. Copilot is written only
+  under `all` — its one marker, `.github`, is present in too many repositories to
+  mean anything. Which agents are configured changes only who gets the *message*;
+  enforcement is in the kernel and depends on no hook.
 
 ### Fixed
 

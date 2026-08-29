@@ -307,8 +307,8 @@ comfortable answer that means nothing about the third.
 `ralon init` installs this; `ralon hook install` does it on its own, and
 `--no-hooks` skips it.
 
-It writes a refusal into the configuration of every agent that documents a hook
-capable of blocking an edit before it happens — nine of them:
+It writes a refusal into the configuration of the agents that document a hook
+capable of blocking an edit before it happens. Nine are supported:
 
 | Agent | File | How it refuses |
 | --- | --- | --- |
@@ -322,10 +322,20 @@ capable of blocking an edit before it happens — nine of them:
 | Windsurf / Cascade | `.windsurf/hooks.json` | exit 2 |
 | OpenCode | `.opencode/plugins/ralon.js` | throws |
 
-`--agent` picks one. One `ralon hook check` serves all nine: the refusal is a
-single JSON document carrying every one of those keys, plus exit code 2, since
-emitting a key an agent ignores costs nothing and omitting one it needs is an
-edit waved through.
+**By default only the agents you actually use are written** — the ones with a
+configuration directory in the project or your home directory. A repo opened only
+with Cursor gets `.cursor/hooks.json`, not eight files for tools it has never
+seen. `--agent all` forces every one (for a tool you have not opened the project
+with yet), `--agent claude` picks a single one, and when detection finds nothing
+it falls back to all, so a project is never left without the message. Copilot is
+the one it cannot detect — its only marker is `.github`, which means nothing on
+its own — so it is written under `all` or `--agent copilot`, not by detection.
+Fewer files changes only which agents get the *message*: enforcement is in the
+kernel and does not depend on any hook.
+
+One `ralon hook check` serves all nine: the refusal is a single JSON document
+carrying every one of those keys, plus exit code 2, since emitting a key an agent
+ignores costs nothing and omitting one it needs is an edit waved through.
 
 Every entry names the **program**, not a path — these files get committed, and an
 absolute path would be one developer's machine in everybody's repository. So the

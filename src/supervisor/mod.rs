@@ -412,7 +412,7 @@ impl Supervisor {
         if !self.registry.config.hooks {
             return;
         }
-        match crate::hook::install_for(root, crate::cli::Agent::All, false) {
+        match crate::hook::install_for(root, crate::cli::Agent::Auto, false) {
             Ok(installed) => {
                 let written = installed.iter().filter(|entry| !entry.replaced).count();
                 if written > 0 {

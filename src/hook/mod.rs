@@ -385,32 +385,149 @@ pub struct Installed {
     pub replaced: bool,
 }
 
-/// Installs the hook for one agent, or for every agent Ralon knows.
+/// Every concrete agent, in the order they are written and reported.
 ///
-/// The default is every agent: a policy should hold whichever tool someone
-/// opens the project with, and you cannot know that in advance.
-pub fn install_for(root: &Path, agent: Agent, dry_run: bool) -> Result<Vec<Installed>> {
+/// `Agent::All` and `Agent::Auto` are selectors over this list, not members of
+/// it. A tenth agent is a new module, an entry here, and a row in [`MARKERS`].
+const ALL_AGENTS: &[Agent] = &[
+    Agent::Claude,
+    Agent::Cursor,
+    Agent::Opencode,
+    Agent::Copilot,
+    Agent::Codex,
+    Agent::Gemini,
+    Agent::Antigravity,
+    Agent::Windsurf,
+    Agent::Cline,
+];
+
+/// The directory whose presence means an agent is in use.
+///
+/// It is the agent's own configuration folder — the parent of the file the hook
+/// goes in — found either in the project (this repository is opened with it) or
+/// in the home directory (this developer uses it, even on a fresh clone the
+/// agent has not written to yet). Both are the agent's choice of location, not
+/// ours, which is what makes their presence evidence.
+struct Marker {
+    agent: Agent,
+    dir: &'static str,
+}
+
+/// Copilot is deliberately absent. Its only footprint is `.github/`, which a
+/// great many repositories have for reasons that have nothing to do with
+/// Copilot, and it keeps no clean home-directory marker — so detecting it would
+/// mean firing on `.github` constantly or missing it always. It is written under
+/// `--agent all` or `--agent copilot`, never by detection.
+const MARKERS: &[Marker] = &[
+    Marker {
+        agent: Agent::Claude,
+        dir: ".claude",
+    },
+    Marker {
+        agent: Agent::Cursor,
+        dir: ".cursor",
+    },
+    Marker {
+        agent: Agent::Opencode,
+        dir: ".opencode",
+    },
+    Marker {
+        agent: Agent::Codex,
+        dir: ".codex",
+    },
+    Marker {
+        agent: Agent::Gemini,
+        dir: ".gemini",
+    },
+    Marker {
+        agent: Agent::Antigravity,
+        dir: ".agents",
+    },
+    Marker {
+        agent: Agent::Windsurf,
+        dir: ".windsurf",
+    },
+    Marker {
+        agent: Agent::Cline,
+        dir: ".clinerules",
+    },
+];
+
+/// The agents this project or machine actually uses, with the home directory
+/// passed in so the rules are a pure function of two paths — testable without an
+/// ambient home.
+///
+/// A heuristic, and honest about being one: it reports an agent whose config
+/// directory is present, which catches every agent that has run here and every
+/// one the developer has set up, and misses one that leaves no such directory
+/// (Copilot, or a tool used from another machine). Missing one costs the
+/// *message*, never the protection — the kernel refuses the write regardless of
+/// which hooks exist — so the failure is a raw OS error instead of a sentence,
+/// which is the state `--agent all` exists to avoid.
+fn detect_in(root: &Path, home: Option<&Path>) -> Vec<Agent> {
+    MARKERS
+        .iter()
+        .filter(|marker| {
+            root.join(marker.dir).is_dir()
+                || home.is_some_and(|home| home.join(marker.dir).is_dir())
+        })
+        .map(|marker| marker.agent)
+        .collect()
+}
+
+/// Turns a selector into the concrete agents to write.
+///
+/// `Auto` falls back to every agent when it detects none, so the choice is only
+/// ever "trim to what is used" when something *is* used — a project is never
+/// left with no hook because detection came up empty.
+fn resolve_agents(root: &Path, agent: Agent, home: Option<&Path>) -> Vec<Agent> {
     match agent {
-        Agent::Claude => Ok(vec![install(root, dry_run)?]),
-        Agent::Cursor => Ok(vec![cursor::install(root, dry_run)?]),
-        Agent::Opencode => Ok(vec![opencode::install(root, dry_run)?]),
-        Agent::Copilot => Ok(vec![copilot::install(root, dry_run)?]),
-        Agent::Codex => Ok(vec![install_codex(root, dry_run)?]),
-        Agent::Gemini => Ok(vec![install_gemini(root, dry_run)?]),
-        Agent::Antigravity => Ok(vec![antigravity::install(root, dry_run)?]),
-        Agent::Windsurf => Ok(vec![install_windsurf(root, dry_run)?]),
-        Agent::Cline => Ok(vec![cline::install(root, dry_run)?]),
-        Agent::All => Ok(vec![
-            install(root, dry_run)?,
-            cursor::install(root, dry_run)?,
-            opencode::install(root, dry_run)?,
-            copilot::install(root, dry_run)?,
-            install_codex(root, dry_run)?,
-            install_gemini(root, dry_run)?,
-            antigravity::install(root, dry_run)?,
-            install_windsurf(root, dry_run)?,
-            cline::install(root, dry_run)?,
-        ]),
+        Agent::All => ALL_AGENTS.to_vec(),
+        Agent::Auto => {
+            let detected = detect_in(root, home);
+            if detected.is_empty() {
+                ALL_AGENTS.to_vec()
+            } else {
+                detected
+            }
+        }
+        one => vec![one],
+    }
+}
+
+/// Installs the hook for the selected agents.
+///
+/// The default selector is `Auto`: only the agents in use here, because writing
+/// nine configuration files into a project when eight of them are for tools it
+/// has never seen is clutter the developer then has to explain in review. `All`
+/// forces every one, for covering a tool not opened yet.
+pub fn install_for(root: &Path, agent: Agent, dry_run: bool) -> Result<Vec<Installed>> {
+    resolve_agents(
+        root,
+        agent,
+        crate::supervisor::registry::user_home().as_deref(),
+    )
+    .into_iter()
+    .map(|agent| install_one(root, agent, dry_run))
+    .collect()
+}
+
+/// Writes one concrete agent's hook. The selectors are resolved away before
+/// this is reached, so meeting one here is a bug rather than a case to handle.
+fn install_one(root: &Path, agent: Agent, dry_run: bool) -> Result<Installed> {
+    match agent {
+        Agent::Claude => install(root, dry_run),
+        Agent::Cursor => cursor::install(root, dry_run),
+        Agent::Opencode => opencode::install(root, dry_run),
+        Agent::Copilot => copilot::install(root, dry_run),
+        Agent::Codex => install_codex(root, dry_run),
+        Agent::Gemini => install_gemini(root, dry_run),
+        Agent::Antigravity => antigravity::install(root, dry_run),
+        Agent::Windsurf => install_windsurf(root, dry_run),
+        Agent::Cline => cline::install(root, dry_run),
+        Agent::All | Agent::Auto => {
+            unreachable!("`{agent:?}` is a selector and is resolved before install_one")
+        }
     }
 }
 
@@ -864,6 +981,83 @@ mod tests {
                 installed.path
             );
         }
+    }
+
+    #[test]
+    fn detection_reads_the_project_and_the_home() {
+        let project = tempdir::TempDir::new();
+        let home = tempdir::TempDir::new();
+
+        // Nothing set up anywhere: nothing detected.
+        assert!(detect_in(project.path(), Some(home.path())).is_empty());
+
+        // A `.cursor` in the project means the project is opened with Cursor.
+        std::fs::create_dir_all(project.path().join(".cursor")).unwrap();
+        // A `.claude` in the home means the developer uses Claude, even here
+        // where the repository has not been opened with it yet.
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+
+        // Both, in MARKERS order — Claude before Cursor.
+        assert_eq!(
+            detect_in(project.path(), Some(home.path())),
+            vec![Agent::Claude, Agent::Cursor]
+        );
+    }
+
+    #[test]
+    fn auto_writes_only_what_is_used_and_all_writes_everything() {
+        let project = tempdir::TempDir::new();
+        std::fs::create_dir_all(project.path().join(".cursor")).unwrap();
+
+        // The whole point: a project that uses only Cursor is not given the other
+        // eight files. Home passed as its own empty dir so the machine running
+        // the test cannot add agents to the answer.
+        let empty_home = tempdir::TempDir::new();
+        let chosen = resolve_agents(project.path(), Agent::Auto, Some(empty_home.path()));
+        assert_eq!(chosen, vec![Agent::Cursor]);
+        assert!(
+            !chosen.contains(&Agent::Claude),
+            "auto wrote a hook for an agent the project does not use"
+        );
+
+        // `all` ignores detection entirely.
+        assert_eq!(
+            resolve_agents(project.path(), Agent::All, Some(empty_home.path())),
+            ALL_AGENTS.to_vec()
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_every_agent_when_it_detects_none() {
+        // The safety valve. A project with nothing recognisable, on a machine
+        // with nothing set up, is covered rather than left with no message — the
+        // change only ever trims when it is sure, never leaves a project bare.
+        let project = tempdir::TempDir::new();
+        let empty_home = tempdir::TempDir::new();
+        assert_eq!(
+            resolve_agents(project.path(), Agent::Auto, Some(empty_home.path())),
+            ALL_AGENTS.to_vec()
+        );
+    }
+
+    #[test]
+    fn copilot_is_never_detected_from_a_github_directory() {
+        // `.github` is present in a great many repositories that have nothing to
+        // do with Copilot, so its presence must not add Copilot to the detected
+        // set. Paired with a real signal (`.cursor`) so the answer is genuine
+        // detection and not the fall-back-to-all a `.github`-only project would
+        // hit — a fall-back that includes Copilot by design, which is a different
+        // question. Only `--agent all` or `--agent copilot` writes Copilot.
+        let project = tempdir::TempDir::new();
+        std::fs::create_dir_all(project.path().join(".github")).unwrap();
+        std::fs::create_dir_all(project.path().join(".cursor")).unwrap();
+
+        assert!(!detect_in(project.path(), None).contains(&Agent::Copilot));
+        assert_eq!(
+            resolve_agents(project.path(), Agent::Auto, None),
+            vec![Agent::Cursor],
+            "`.github` was treated as a Copilot marker"
+        );
     }
 
     #[test]

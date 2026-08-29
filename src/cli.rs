@@ -243,7 +243,7 @@ pub enum HookAction {
     /// Wire the hook into an agent's configuration
     Install {
         /// Which agent to configure
-        #[arg(long, value_enum, default_value_t = Agent::All)]
+        #[arg(long, value_enum, default_value_t = Agent::Auto)]
         agent: Agent,
 
         /// Print the configuration instead of writing it
@@ -261,8 +261,13 @@ pub enum HookAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Agent {
-    /// Every agent below. A policy should hold whichever tool the project is
-    /// opened with, and you cannot know that in advance.
+    /// Only the agents this machine or project actually uses — those with a
+    /// configuration directory here or in your home directory. Falls back to
+    /// every agent when it can detect none, so a project is never left without
+    /// the message. The default.
+    Auto,
+    /// Every agent below, whether or not it is used here. Use this to cover a
+    /// tool you have not opened the project with yet.
     All,
     /// Claude Code — .claude/settings.json
     Claude,

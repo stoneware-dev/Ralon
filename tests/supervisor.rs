@@ -592,6 +592,11 @@ mod with_a_supervisor {
         // installs the hook rather than leaving it to be discovered.
         let machine = Machine::new();
         let repository = machine.repository("app", Some(POLICY));
+        // Hooks are written only for agents the project or machine uses, so the
+        // project has to look like it uses Claude for this to assert on Claude's
+        // file rather than on whatever the test machine happens to have set up.
+        // A bare `.claude` directory is exactly the marker detection looks for.
+        fs::create_dir_all(repository.path(".claude")).unwrap();
         machine.tick();
 
         let settings = repository.contents(".claude/settings.json");

@@ -40,7 +40,7 @@ pub fn init(directory: &Path, force: bool, no_hooks: bool) -> Result<ExitCode> {
     // policy it just wrote is a template nobody has edited yet, and a guard
     // holding a snapshot of it would protect the wrong paths convincingly.
     if !no_hooks {
-        for entry in hook::install_for(directory, Agent::All, false)? {
+        for entry in hook::install_for(directory, Agent::Auto, false)? {
             println!(
                 "{} {}",
                 if entry.replaced { "updated" } else { "wrote" },
